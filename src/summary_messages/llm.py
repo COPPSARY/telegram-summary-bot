@@ -19,18 +19,25 @@ class SummaryClient:
 
     def _summarize_sync(self, prompt: SummaryPrompt) -> str:
         if self.settings.llm_provider == "gemini":
-            api_key = self.settings.gemini_api_key
-            if not api_key:
+            keys = self.settings.gemini_api_keys
+            if not keys:
                 raise ValueError("GEMINI_API_KEY is required when LLM_PROVIDER=gemini")
-            client = genai.Client(api_key=api_key)
-            response = client.models.generate_content(
-                model=self.settings.llm_model,
-                contents=[prompt.system, prompt.user],
-            )
-            text = getattr(response, "text", None)
-            if text:
-                return text.strip()
-            return str(response)
+            last_error = None
+            for api_key in keys:
+                try:
+                    client = genai.Client(api_key=api_key)
+                    response = client.models.generate_content(
+                        model=self.settings.llm_model,
+                        contents=[prompt.system, prompt.user],
+                    )
+                    text = getattr(response, "text", None)
+                    if text:
+                        return text.strip()
+                    return str(response)
+                except Exception as exc:
+                    last_error = exc
+                    continue
+            raise last_error  # type: ignore[misc]
 
         if self.settings.llm_provider == "openrouter":
             api_key = self.settings.openrouter_api_key
@@ -44,6 +51,7 @@ class SummaryClient:
                     {"role": "user", "content": prompt.user},
                 ],
                 temperature=0.2,
+                max_tokens=500,
             )
             choice = response.choices[0].message.content or ""
             return choice.strip()

@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     llm_model: str = Field(default="gemini-2.0-flash", validation_alias="LLM_MODEL")
     
     gemini_api_key: str | None = Field(default=None, validation_alias="GEMINI_API_KEY")
+    gemini_api_key2: str | None = Field(default=None, validation_alias="GEMINI_API_KEY2")
+    gemini_api_key3: str | None = Field(default=None, validation_alias="GEMINI_API_KEY3")
+    gemini_api_key4: str | None = Field(default=None, validation_alias="GEMINI_API_KEY4")
+    gemini_api_key5: str | None = Field(default=None, validation_alias="GEMINI_API_KEY5")
     openrouter_api_key: str | None = Field(default=None, validation_alias="OPENROUTER_API_KEY")
     ollama_base_url: str = Field(default="http://localhost:11434/v1", validation_alias="OLLAMA_BASE_URL")
     hf_token: str | None = Field(default=None, validation_alias="HF_TOKEN")
@@ -29,6 +33,17 @@ class Settings(BaseSettings):
     daily_summary_time: str = Field(default="23:00", validation_alias="DAILY_SUMMARY_TIME")
     timezone: str = Field(default="UTC", validation_alias="TIMEZONE")
     max_messages_per_summary: int = Field(default=120, validation_alias="MAX_MESSAGES_PER_SUMMARY")
+
+    group_name: str = Field(default="COPPSARY", validation_alias="GROUP_NAME")
+    group_members: str = Field(default="", validation_alias="GROUP_MEMBERS")
+
+    @property
+    def gemini_api_keys(self) -> list[str]:
+        return [k for k in [self.gemini_api_key, self.gemini_api_key2, self.gemini_api_key3, self.gemini_api_key4, self.gemini_api_key5] if k]
+
+    @property
+    def group_members_list(self) -> list[str]:
+        return [m.strip() for m in self.group_members.split(",") if m.strip()]
 
     @property
     def timezone_info(self) -> ZoneInfo:

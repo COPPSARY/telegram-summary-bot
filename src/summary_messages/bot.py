@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from telegram import Update
-from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, MessageEntity, Update
+from telegram.ext import Application, ApplicationBuilder, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from .config import Settings
 from .db import Database, StoredMessage
+from .games import BlackjackGame, coinflip
 from .llm import SummaryClient
+from .prompts import build_chat_prompt, build_joke_prompt, build_predict_prompt, build_roast_prompt
 from .service import SummaryService
 
 logger = logging.getLogger(__name__)
@@ -25,14 +28,14 @@ class BotRuntime:
 
 
 async def _reply_chunked(message, text: str) -> None:
-    if len(text) <= 300:
+    if len(text) <= 3900:
         await message.reply_text(text)
         return
 
     start = 0
     while start < len(text):
-        await message.reply_text(text[start : start + 300])
-        start += 300
+        await message.reply_text(text[start : start + 3900])
+        start += 3900
 
 
 class SummaryBot:
@@ -42,6 +45,9 @@ class SummaryBot:
         self.client = SummaryClient(settings)
         self.service = SummaryService(settings=settings, database=self.database, client=self.client)
         self.scheduler = AsyncIOScheduler(timezone=settings.timezone_info)
+        self.balances: dict[int, int] = defaultdict(lambda: 1000)
+        self._bj_games: dict[tuple[int, int], BlackjackGame] = {}
+        self.conversations: dict[tuple[int, int], list[tuple[str, str]]] = defaultdict(list)
 
     async def initialize(self) -> None:
         await self.database.initialize()
@@ -59,7 +65,20 @@ class SummaryBot:
         application.add_handler(CommandHandler("help", self.help_command))
         application.add_handler(CommandHandler("summary", self.summary_command))
         application.add_handler(CommandHandler("daily_summary", self.daily_summary_command))
+        application.add_handler(CommandHandler("bj", self.bj_command))
+        application.add_handler(CommandHandler("cf", self.cf_command))
+        application.add_handler(CommandHandler("fuck", self.fuck_command))
+        application.add_handler(CommandHandler("predict", self.predict_command))
+        application.add_handler(CommandHandler("joke", self.joke_command))
+        application.add_handler(CallbackQueryHandler(self.bj_callback, pattern="^bj_"))
         application.add_handler(MessageHandler(~filters.COMMAND, self.store_message))
+        application.add_handler(
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND & filters.Entity(MessageEntity.MENTION),
+                self.mention_handler,
+            ),
+            group=1,
+        )
         return application
 
     async def post_init(self, application: Application) -> None:
@@ -102,7 +121,13 @@ class SummaryBot:
             "/summary - summarize the default window\n"
             "/summary 1h - summarize the last hour\n"
             "/summary 24h - summarize the last 24 hours\n"
-            "/daily_summary - force the daily digest now"
+            "/daily_summary - force the daily digest now\n"
+            "/bj <bet> - play blackjack\n"
+            "/cf - flip a coin\n"
+            "/fuck @user - roast a user\n"
+            "/predict <question> - AI predicts anything\n"
+            "/joke - tell a random joke\n"
+            "@botname - chat with the bot"
         )
 
     async def summary_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -222,6 +247,248 @@ class SummaryBot:
             logger.warning("Cannot send message because application is not initialized for chat_id=%s", chat_id)
             return
         await application.bot.send_message(chat_id=chat_id, text=text)
+
+    async def joke_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = update.effective_message
+        if not message:
+            return
+        await message.reply_chat_action("typing")
+        prompt = build_joke_prompt()
+        try:
+            joke = await self.client.summarize(prompt)
+            await message.reply_text(f"😂 {joke}")
+        except Exception as exc:
+            logger.error("Joke failed: %s", exc)
+            await message.reply_text("😂 Why did the chicken cross the road? To get to the other side!")
+
+    async def mention_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = update.effective_message
+        chat = update.effective_chat
+        user = update.effective_user
+        if not message or not chat or not user:
+            return
+        if chat.type not in {"group", "supergroup"}:
+            return
+
+        bot_username = context.bot.username
+        if not bot_username:
+            return
+
+        mentioned = False
+        for entity in message.entities:
+            if entity.type == "mention":
+                mention = message.text[entity.offset:entity.offset + entity.length]
+                if mention.lower() == f"@{bot_username.lower()}":
+                    mentioned = True
+                    break
+
+        if not mentioned:
+            return
+
+        text = message.text or ""
+        for entity in reversed(message.entities):
+            if entity.type == "mention":
+                text = text[:entity.offset] + text[entity.offset + entity.length:]
+        text = text.strip()
+
+        if not text:
+            return
+
+        key = (chat.id, user.id)
+        history = self.conversations.get(key, [])
+
+        lower = text.lower()
+        members = self.config.group_members_list
+        member_lower = {m.lower() for m in members}
+        creator_keywords = ["who created", "who made", "who build", "who built", "your master", "who owns", "who own", "who is your creator", "who made you", "who created you", "who owns you", "who's your master", "who your master", "your creator"]
+        if any(kw in lower for kw in creator_keywords):
+            member_list = ", ".join(members) if members else ""
+            parts = [f"I was created by the {self.config.group_name} group."]
+            parts.append(f"{self.config.group_name} is a software and design project or collective team. Members associated with the project include technology students and aspiring software developers, such as those at the Cambodia Academy of Digital Technology.")
+            if member_list:
+                parts.append(f"Members: {member_list}.")
+            parts.append("GitHub: https://github.com/COPPSARY/")
+            await message.reply_text(" ".join(parts))
+            return
+
+        for m in member_lower:
+            if m in lower and ("do you know" in lower or "who is" in lower or "tell me about" in lower):
+                await message.reply_text(f"Yes! {m.capitalize()} is a member of {self.config.group_name} — a software and design collective of technology students and aspiring developers at the Cambodia Academy of Digital Technology. GitHub: https://github.com/COPPSARY/")
+                return
+
+        await message.reply_chat_action("typing")
+        prompt = build_chat_prompt(user_name=user.full_name, message=text, history=history)
+        try:
+            reply = await self.client.summarize(prompt)
+            await message.reply_text(reply)
+            history.append((text, reply))
+            self.conversations[key] = history[-10:]
+        except Exception as exc:
+            logger.error("Chat reply failed: %s", exc)
+
+    async def predict_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = update.effective_message
+        if not message:
+            return
+
+        question = " ".join(context.args).strip()
+        if not question:
+            await message.reply_text("Usage: /predict <question>\nExample: /predict who wins the world cup?")
+            return
+
+        await message.reply_chat_action("typing")
+        prompt = build_predict_prompt(question=question)
+        try:
+            prediction = await self.client.summarize(prompt)
+            await message.reply_text(f"🔮 Prediction: {question}\n\n{prediction}")
+        except Exception as exc:
+            logger.error("Prediction failed: %s", exc)
+            await message.reply_text("🔮 The crystal ball is cloudy right now. Try again later.")
+
+    async def bj_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = update.effective_message
+        user = update.effective_user
+        if not message or not user:
+            return
+
+        user_id = user.id
+        if context.args:
+            try:
+                bet = int(context.args[0])
+            except ValueError:
+                await message.reply_text("Usage: /bj <bet>")
+                return
+        else:
+            bet = 10
+
+        if bet < 1:
+            await message.reply_text("Bet must be at least 1.")
+            return
+        if self.balances[user_id] < bet:
+            await message.reply_text(f"You only have ${self.balances[user_id]}. Not enough to bet ${bet}.")
+            return
+
+        game = BlackjackGame()
+        game.bet = bet
+        game.deal()
+        chat_id = update.effective_chat.id if update.effective_chat else 0
+        self._bj_games[(chat_id, user_id)] = game
+
+        status = f"🃏 Blackjack\nBet: ${bet}\n\nDealer: {game.dealer_hand_str}\nPlayer: {game.player_hand_str}"
+
+        if game.state == "blackjack":
+            payout = int(bet * 1.5)
+            self.balances[user_id] += payout
+            await message.reply_text(
+                f"{status}\n\nBlackjack! You win ${payout}!\nBalance: ${self.balances[user_id]}"
+            )
+            del self._bj_games[(chat_id, user_id)]
+        else:
+            keyboard = [
+                [InlineKeyboardButton("Hit", callback_data="bj_hit"),
+                 InlineKeyboardButton("Stand", callback_data="bj_stand")]
+            ]
+            await message.reply_text(status, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    async def bj_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        if not query:
+            return
+        await query.answer()
+        user = update.effective_user
+        chat = update.effective_chat
+        if not user or not chat:
+            return
+
+        game = self._bj_games.get((chat.id, user.id))
+        if not game:
+            await query.edit_message_text("No active game. Start one with /bj <bet>")
+            return
+
+        if game.state != "playing":
+            return
+
+        action = query.data
+        if action == "bj_hit":
+            game.hit()
+        elif action == "bj_stand":
+            game.stand()
+
+        status = f"🃏 Blackjack\nBet: ${game.bet}\n\nDealer: {game.dealer_hand_str}\nPlayer: {game.player_hand_str}"
+
+        if game.state == "playing":
+            keyboard = [
+                [InlineKeyboardButton("Hit", callback_data="bj_hit"),
+                 InlineKeyboardButton("Stand", callback_data="bj_stand")]
+            ]
+            await query.edit_message_text(status, reply_markup=InlineKeyboardMarkup(keyboard))
+        else:
+            user_id = user.id
+            payout = game.payout()
+            self.balances[user_id] += payout
+
+            result_map = {
+                "blackjack": "Blackjack! 🎉",
+                "player_win": "You win! 🎉",
+                "dealer_win": "Dealer wins!",
+                "push": "Push!",
+                "player_bust": "You bust! 💥",
+                "dealer_bust": "Dealer busts! 🎉",
+            }
+            result_line = result_map.get(game.state, "")
+
+            full = f"Dealer: {game.dealer_hand_full} ({game.dealer_value})\nPlayer: {game.player_hand_str} ({game.player_value})"
+            await query.edit_message_text(
+                f"{result_line}\n\n{full}\n\nPayout: ${payout:+d}\nBalance: ${self.balances[user_id]}"
+            )
+            del self._bj_games[(chat.id, user.id)]
+
+    async def cf_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = update.effective_message
+        if not message:
+            return
+
+        result = coinflip()
+        if context.args and context.args[0].lower() in ("heads", "tails"):
+            guess = context.args[0].lower()
+            user_result = result.lower()
+            if guess == user_result:
+                await message.reply_text(f"{result} 🎉\nYou guessed right!")
+            else:
+                await message.reply_text(f"{result}\nWrong! It was {result}.")
+        else:
+            await message.reply_text(f"🪙 {result}")
+
+    async def fuck_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = update.effective_message
+        if not message:
+            return
+
+        if not message.entities:
+            await message.reply_text("Mention someone to roast, e.g. /fuck @username")
+            return
+
+        mentioned = None
+        for entity in message.entities:
+            if entity.type == "mention":
+                mentioned = message.text[entity.offset:entity.offset + entity.length]
+                break
+            if entity.type == "text_mention" and entity.user:
+                mentioned = entity.user.full_name
+                break
+
+        if not mentioned:
+            await message.reply_text("Mention someone to roast, e.g. /fuck @username")
+            return
+
+        await message.reply_chat_action("typing")
+        prompt = build_roast_prompt(user_name=mentioned)
+        try:
+            roast = await self.client.summarize(prompt)
+            await message.reply_text(f"🔥 {mentioned}\n{roast}")
+        except Exception as exc:
+            logger.error("Roast failed: %s", exc)
+            await message.reply_text(f" {mentioned}\nfuck you little boy")
 
     application: Application | None = None
 

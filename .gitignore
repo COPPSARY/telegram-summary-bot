@@ -1,9 +1,40 @@
+# Environment
 .env
 .venv/
+venv/
+env/
+
+# Python
 __pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Cache
 .pytest_cache/
 .ruff_cache/
-*.pyc
+.mypy_cache/
+cache/
+
+# Data
 data/
 *.sqlite3
 *.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
