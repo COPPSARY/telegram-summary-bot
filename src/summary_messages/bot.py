@@ -311,6 +311,13 @@ class SummaryBot:
             await message.reply_text(" ".join(parts))
             return
 
+        group_name_lower = self.settings.group_name.lower()
+        list_keywords = ["list the people", "list members", "list team", "who are the members", "list names", "people i can smash", "all the members", "the members"]
+        if any(kw in lower for kw in list_keywords) and group_name_lower in lower:
+            member_list = ", ".join(members) if members else "No members configured."
+            await message.reply_text(f"Members of {self.settings.group_name}: {member_list}.")
+            return
+
         for m in member_lower:
             if m in lower and ("do you know" in lower or "who is" in lower or "tell me about" in lower):
                 await message.reply_text(f"Yes! {m.capitalize()} is a member of {self.settings.group_name} — a software and design collective of technology students and aspiring developers at the Cambodia Academy of Digital Technology. GitHub: https://github.com/COPPSARY/")
