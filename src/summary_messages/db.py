@@ -44,6 +44,21 @@ CREATE TABLE IF NOT EXISTS summary_runs (
     FOREIGN KEY(chat_id) REFERENCES chats(chat_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS reminders (
+    id BIGSERIAL PRIMARY KEY,
+    chat_id BIGINT NOT NULL,
+    user_id BIGINT,
+    user_name TEXT NOT NULL,
+    text TEXT NOT NULL,
+    remind_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    is_sent BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+CREATE INDEX IF NOT EXISTS idx_reminders_remind_at
+ON reminders(remind_at)
+WHERE is_sent = FALSE;
+
 CREATE OR REPLACE FUNCTION delete_old_messages_fn()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -240,5 +255,63 @@ class Database:
                     summary_text,
                     datetime.now(timezone.utc),
                 ),
+            )
+            await conn.commit()
+
+    
+    async def create_reminder(
+        self,
+        *,
+        chat_id: int,
+        user_id: int | None,
+        user_name: str,
+        text: str,
+        remind_at: datetime,
+    ) -> int:
+        async with await self.get_connection() as conn:
+            cursor = await conn.execute(
+                """
+                INSERT INTO reminders (
+                    chat_id, user_id, user_name, text, remind_at, created_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    chat_id,
+                    user_id,
+                    user_name,
+                    text,
+                    remind_at.astimezone(timezone.utc),
+                    datetime.now(timezone.utc),
+                ),
+            )
+            row = await cursor.fetchone()
+            await conn.commit()
+            return row["id"]
+
+
+    async def list_pending_reminders(self) -> list[dict]:
+        async with await self.get_connection() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT id, chat_id, user_id, user_name, text, remind_at
+                FROM reminders
+                WHERE is_sent = FALSE
+                ORDER BY remind_at ASC
+                """
+            )
+            return await cursor.fetchall()
+
+
+    async def mark_reminder_sent(self, reminder_id: int) -> None:
+        async with await self.get_connection() as conn:
+            await conn.execute(
+                """
+                UPDATE reminders
+                SET is_sent = TRUE
+                WHERE id = %s
+                """,
+                (reminder_id,),
             )
             await conn.commit()

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import re
 import logging
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import timezone
+from datetime import timezone, datetime
+from turtle import update
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, MessageEntity, Update
@@ -15,6 +17,7 @@ from .games import BlackjackGame, coinflip
 from .llm import SummaryClient
 from .prompts import build_chat_prompt, build_joke_prompt, build_predict_prompt, build_roast_prompt
 from .service import SummaryService
+from .reminder import parse_natural_reminder, ParsedReminder
 
 logger = logging.getLogger(__name__)
 
@@ -29,12 +32,12 @@ class BotRuntime:
 
 async def _reply_chunked(message, text: str) -> None:
     if len(text) <= 3900:
-        await message.reply_text(text, parse_mode="Markdown")
+        await message.reply_text(text, parse_mode="MarkdownV2")
         return
 
     start = 0
     while start < len(text):
-        await message.reply_text(text[start : start + 3900], parse_mode="Markdown")
+        await message.reply_text(text[start : start + 3900], parse_mode="MarkdownV2")
         start += 3900
 
 
@@ -65,6 +68,7 @@ class SummaryBot:
         application.add_handler(CommandHandler("help", self.help_command))
         application.add_handler(CommandHandler("summary", self.summary_command))
         application.add_handler(CommandHandler("daily_summary", self.daily_summary_command))
+        application.add_handler(CommandHandler("reminder", self.reminder_command))
         application.add_handler(CommandHandler("bj", self.bj_command))
         application.add_handler(CommandHandler("cf", self.cf_command))
         application.add_handler(CommandHandler("fuck", self.fuck_command))
@@ -91,6 +95,7 @@ class SummaryBot:
             id="daily-summary",
             replace_existing=True,
         )
+        await self.restore_pending_reminders()
         self.scheduler.start()
         logger.info(
             "Bot started with provider=%s model=%s timezone=%s daily_summary_time=%s",
@@ -122,6 +127,7 @@ class SummaryBot:
             "/summary 1h - summarize the last hour\n"
             "/summary 24h - summarize the last 24 hours\n"
             "/daily_summary - force the daily digest now\n"
+            "/reminder <text> at 4 pm tomorrow - set a reminder\n"
             "/bj <bet> - play blackjack\n"
             "/cf - flip a coin\n"
             "/fuck @user - roast a user\n"
@@ -157,6 +163,7 @@ class SummaryBot:
         except ValueError as exc:
             logger.warning("Summary request failed for chat_id=%s: %s", chat.id, exc)
             await message.reply_text(str(exc))
+            await message.sticker(self.settings.fallback_sticker_file_id)
             return
 
         await _reply_chunked(message, f"Summary for {window.label}\n\n{summary}")
@@ -245,8 +252,123 @@ class SummaryBot:
         if application is None:
             logger.warning("Cannot send message because application is not initialized for chat_id=%s", chat_id)
             return
-        await application.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+        await application.bot.send_message(chat_id=chat_id, text=text, parse_mode="MarkdownV2")
 
+    async def reminder_command(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        message = update.effective_message
+        chat = update.effective_chat
+        user = update.effective_user
+
+        if not message or not chat or not user:
+            return
+
+        raw_text = " ".join(context.args).strip()
+
+        if not raw_text:
+            await message.reply_text(
+                "Usage:\n"
+                "/reminder go to pool 4:00 pm\n"
+                "/reminder go to pool at 4 pm tomorrow\n"
+                "/reminder drink water in 10 minutes"
+            )
+            return
+
+        parsed = self.parse_reminder(raw_text)
+
+        if not parsed:
+            await message.reply_text(
+                "I couldn't understand the reminder time.\n\n"
+                "Try:\n"
+                "/reminder go to pool at 4 pm tomorrow\n"
+                "/reminder drink water in 10 minutes"
+            )
+            return
+
+        reminder_text, remind_at = parsed
+        now = datetime.now(remind_at.tzinfo)
+
+        if remind_at <= now:
+            await message.reply_text("Please choose a future time.")
+            return
+
+        reminder_id = await self.database.create_reminder(
+            chat_id=chat.id,
+            user_id=user.id,
+            user_name=user.full_name,
+            text=reminder_text,
+            remind_at=remind_at,
+        )
+
+        self.scheduler.add_job(
+            self.send_reminder,
+            trigger="date",
+            run_date=remind_at,
+            args=[reminder_id, chat.id, user.full_name, reminder_text],
+            id=f"reminder-{reminder_id}",
+            replace_existing=True,
+        )
+
+        await message.reply_text(
+            f"✅ Reminder set!\n\n"
+            f"Reminder: {reminder_text}\n"
+            f"Time: {remind_at.strftime('%Y-%m-%d %I:%M %p')}"
+        )
+    
+    
+    async def send_reminder(
+        self,
+        reminder_id: int,
+        chat_id: int,
+        user_name: str,
+        text: str,
+    ) -> None:
+        try:
+            await self._send_message(
+                chat_id,
+                f"⏰ Reminder for {user_name}:\n\n{text}",
+            )
+            await self.database.mark_reminder_sent(reminder_id)
+        except Exception as exc:
+            await self.application.bot.sticker(chat_id=chat_id, sticker=self.settings.fallback_sticker_file_id)
+            logger.error("Failed to send reminder %s: %s", reminder_id, exc)
+    
+    async def restore_pending_reminders(self) -> None:
+        reminders = await self.database.list_pending_reminders()
+        now = datetime.now(timezone.utc)
+
+        for reminder in reminders:
+            remind_at = reminder["remind_at"]
+
+            if remind_at <= now:
+                await self.send_reminder(
+                    reminder["id"],
+                    reminder["chat_id"],
+                    reminder["user_name"],
+                    reminder["text"],
+                )
+                continue
+
+            self.scheduler.add_job(
+                self.send_reminder,
+                trigger="date",
+                run_date=remind_at,
+                args=[
+                    reminder["id"],
+                    reminder["chat_id"],
+                    reminder["user_name"],
+                    reminder["text"],
+                ],
+                id=f"reminder-{reminder['id']}",
+                replace_existing=True,
+            )
+
+        logger.info("Restored %s pending reminders", len(reminders))
+    
+    
     async def joke_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message
         if not message:
