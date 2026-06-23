@@ -31,12 +31,12 @@ class BotRuntime:
 
 async def _reply_chunked(message, text: str) -> None:
     if len(text) <= 3900:
-        await message.reply_text(text, parse_mode="MarkdownV2")
+        await message.reply_text(text)
         return
 
     start = 0
     while start < len(text):
-        await message.reply_text(text[start : start + 3900], parse_mode="MarkdownV2")
+        await message.reply_text(text[start : start + 3900])
         start += 3900
 
 
@@ -251,7 +251,7 @@ class SummaryBot:
         if application is None:
             logger.warning("Cannot send message because application is not initialized for chat_id=%s", chat_id)
             return
-        await application.bot.send_message(chat_id=chat_id, text=text, parse_mode="MarkdownV2")
+        await application.bot.send_message(chat_id=chat_id, text=text)
 
     async def reminder_command(
         self,
