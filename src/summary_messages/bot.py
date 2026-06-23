@@ -162,7 +162,7 @@ class SummaryBot:
         except ValueError as exc:
             logger.warning("Summary request failed for chat_id=%s: %s", chat.id, exc)
             await message.reply_text(str(exc))
-            await message.sticker(self.settings.fallback_sticker_file_id)
+            await message.reply_sticker(sticker=self.settings.fallback_sticker_file_id)
             return
 
         await _reply_chunked(message, f"Summary for {window.label}\n\n{summary}")
@@ -387,7 +387,7 @@ class SummaryBot:
             )
             await self.database.mark_reminder_sent(reminder_id)
         except Exception as exc:
-            await self.application.bot.sticker(chat_id=chat_id, sticker=self.settings.fallback_sticker_file_id)
+            await self.application.bot.send_sticker(chat_id=chat_id, sticker=self.settings.fallback_sticker_file_id)
             logger.error("Failed to send reminder %s: %s", reminder_id, exc)
     
     async def restore_pending_reminders(self) -> None:
